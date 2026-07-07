@@ -3,7 +3,9 @@ import requests
 import datetime
 import sqlite3
 
-# 1. CONFIGURAÇÃO DO BANCO DE DADOS (SQLite)
+# =================================================================
+# 1. CONFIGURAÇÃO DO BANCO DE DADOS (SQLite) E ATUALIZAÇÃO SEGURA
+# =================================================================
 conn = sqlite3.connect("alertas_voos.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("""
@@ -21,6 +23,13 @@ CREATE TABLE IF NOT EXISTS alertas (
     status TEXT DEFAULT 'Ativo'
 )
 """)
+
+# Tenta adicionar a nova coluna de "voos diretos" caso o banco de dados já exista na versão antiga
+try:
+    cursor.execute("ALTER TABLE alertas ADD COLUMN somente_diretos INTEGER DEFAULT 0")
+except sqlite3.OperationalError:
+    pass # A coluna já existe, segue o jogo.
+
 conn.commit()
 
 # CONFIGURAÇÃO DA PÁGINA
@@ -58,7 +67,7 @@ if pagina == "🔍 Buscar e Criar Alertas":
         classe_nome = st.selectbox("Classe de Voo:", ["Econômica", "Executiva"])
         classe_voo = "1" if classe_nome == "Econômica" else "3"
 
-    # LINHA 2: DATAS FLEXÍVEIS (INTERVALO DE IDA)
+    # LINHA 2: DATAS FLEXÍVEIS (INTERVALO DE IDA E DURAÇÃO COM OPÇÃO 0)
     st.subheader("🗓️ Escolha o Intervalo de Datas para IDA")
     col_data1, col_data2, col_data3 = st.columns(3)
     with col_data1:
@@ -66,17 +75,21 @@ if pagina == "🔍 Buscar e Criar Alertas":
     with col_data2:
         data_ida_fim = st.date_input("Até o dia (Range de Ida):", datetime.date(2026, 10, 12))
     with col_data3:
-        duracao_viagem = st.number_input("Duração da Viagem (Quantidade de dias no destino):", value=14, min_value=1)
+        # Ajuste feito: min_value=0 permite viagens bate-e-volta no mesmo dia
+        duracao_viagem = st.number_input("Duração (0 = Bate e Volta no mesmo dia):", value=14, min_value=0)
 
-    # LINHA 3: PASSAGEIROS E ALERTA
-    st.subheader("👥 Passageiros & Alerta de Preço")
+    # LINHA 3: PASSAGEIROS, FILTRO DE PARADAS E ALERTA
+    st.subheader("👥 Filtros Adicionais & Alerta de Preço")
     col_p1, col_p2, col_p3 = st.columns(3)
     with col_p1:
         qtd_adultos = st.number_input("Adultos:", value=1, min_value=1, step=1)
     with col_p2:
         qtd_criancas = st.number_input("Crianças (2 a 11 anos):", value=0, min_value=0, step=1)
     with col_p3:
-        preco_alvo = st.number_input("Defina um Preço Alvo TOTAL para Alerta (R$):", value=4500, step=100)
+        preco_alvo = st.number_input("Preço Alvo TOTAL para Alerta (R$):", value=4500, step=100)
+
+    # Nova opção visual para buscar apenas voos diretos
+    somente_diretos = st.checkbox("🛑 Exibir APENAS voos diretos (sem escalas)")
 
     st.markdown("---")
     
@@ -86,21 +99,21 @@ if pagina == "🔍 Buscar e Criar Alertas":
     with col_btn2:
         salvar_alerta = st.button("🔔 Salvar este Alerta de Monitoramento")
 
-    # Salva no Banco de Dados mantendo os ranges flexíveis e passageiros cadastrados
+    # Salva no Banco de Dados mantendo os ranges flexíveis, passageiros e filtro de direto cadastrados
     if salvar_alerta:
+        valor_direto_bd = 1 if somente_diretos else 0
         cursor.execute("""
-            INSERT INTO alertas (origem, destino, data_ida_inicio, data_ida_fim, duracao_viagem, classe, qtd_adultos, qtd_criancas, preco_alvo)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (origem, destino, data_ida_inicio.strftime("%Y-%m-%d"), data_ida_fim.strftime("%Y-%m-%d"), int(duracao_viagem), classe_voo, int(qtd_adultos), int(qtd_criancas), preco_alvo))
+            INSERT INTO alertas (origem, destino, data_ida_inicio, data_ida_fim, duracao_viagem, classe, qtd_adultos, qtd_criancas, preco_alvo, somente_diretos)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (origem, destino, data_ida_inicio.strftime("%Y-%m-%d"), data_ida_fim.strftime("%Y-%m-%d"), int(duracao_viagem), classe_voo, int(qtd_adultos), int(qtd_criancas), preco_alvo, valor_direto_bd))
         conn.commit()
         st.success(f"✅ Alerta dinâmico salvo com sucesso para {destino}! O sistema passará a monitorar este range.")
 
-    # Lógica de busca acumulada e corrigida (Com Range de Datas, Passageiros e Detalhes)
+    # Lógica de busca acumulada e corrigida
     if buscar:
         if data_ida_inicio > data_ida_fim:
             st.error("Erro: A data inicial de ida não pode ser maior que a data final.")
         else:
-            # Gerar a lista de dias do intervalo
             dias_para_pesquisar = []
             data_atual = data_ida_inicio
             while data_atual <= data_ida_fim:
@@ -121,6 +134,11 @@ if pagina == "🔍 Buscar e Criar Alertas":
                         "travel_class": classe_voo, "adults": int(qtd_adultos), "children": int(qtd_criancas),
                         "currency": "BRL", "api_key": MINHA_CHAVE_SERPAPI
                     }
+                    
+                    # Se o usuário marcou apenas diretos, injeta o filtro na API
+                    if somente_diretos:
+                        parametros["stops"] = "0"
+
                     resposta = requests.get(url_da_api, params=parametros)
                     dados_dos_voos = resposta.json()
 
@@ -182,6 +200,8 @@ if pagina == "🔍 Buscar e Criar Alertas":
                         mensagem_telegram += f"✈️ *{companhia}* | 💰 *R$ {preco_total_viagem}*\n"
                         mensagem_telegram += f"📅 Ida: {voo['data_ida_pesquisada']} | Volta: {voo['data_volta_pesquisada']}\n"
                         mensagem_telegram += f"🛫 Rota: {origem_real} ➔ {destino_real} | ⏳ {texto_duracao}\n"
+                        if somente_diretos:
+                            mensagem_telegram += f"✅ APENAS VOOS DIRETOS\n"
                         mensagem_telegram += "➖➖➖➖➖➖➖➖➖➖\n"
 
                 if encontrou_promocao:
@@ -189,28 +209,27 @@ if pagina == "🔍 Buscar e Criar Alertas":
                     requests.post(url_telegram, data={"chat_id": MEU_CHAT_ID, "text": mensagem_telegram, "parse_mode": "Markdown"})
                     st.success("📲 Voos detectados abaixo da meta! Alerta enviado ao Telegram.")
             else:
-                st.error("Nenhum voo encontrado no intervalo de filtros selecionado.")
+                st.error("Nenhum voo encontrado no intervalo e filtros selecionados.")
 
 # =================================================================
-# PÁGINA 2: GERENCIAR ALERTAS ATIVOS
+# PÁGINA 2: GERENCIAR ALERTAS ATIVOS E MONITORAR
 # =================================================================
 elif pagina == "🗂️ Gerenciar Alertas Ativos":
     st.title("🗂️ Seus Alertas de Monitoramento")
     st.write("Abaixo você gerencia ou executa os rastreamentos multi-datas salvos no banco de dados.")
 
-    # 🔄 BOTÃO MÁGICO DO MONITORAMENTO AUTOMÁTICO (Roda todos os alertas ativos cruzando o range)
+    # 🔄 BOTÃO MÁGICO DO MONITORAMENTO AUTOMÁTICO
     if st.button("🔄 Executar Monitoramento Agora (Processar todos os ranges ativos)"):
         with st.spinner("Processando todos os intervalos de monitoramento..."):
-            cursor.execute("SELECT origem, destino, data_ida_inicio, data_ida_fim, duracao_viagem, classe, qtd_adultos, qtd_criancas, preco_alvo FROM alertas WHERE status = 'Ativo'")
+            cursor.execute("SELECT origem, destino, data_ida_inicio, data_ida_fim, duracao_viagem, classe, qtd_adultos, qtd_criancas, preco_alvo, somente_diretos FROM alertas WHERE status = 'Ativo'")
             alertas_ativos = cursor.fetchall()
             
             if not alertas_ativos:
                 st.warning("Nenhum alerta ativo configurado para monitoramento.")
             else:
                 for art in alertas_ativos:
-                    orig_a, dest_a, ida_ini_a, ida_fim_a, dur_a, cl_a, ad_a, cr_a, alvo_a = art
+                    orig_a, dest_a, ida_ini_a, ida_fim_a, dur_a, cl_a, ad_a, cr_a, alvo_a, diretos_a = art
                     
-                    # Reconstrói as datas salva no banco de dados
                     d_ini = datetime.datetime.strptime(ida_ini_a, "%Y-%m-%d").date()
                     d_fim = datetime.datetime.strptime(ida_fim_a, "%Y-%m-%d").date()
                     
@@ -223,7 +242,6 @@ elif pagina == "🗂️ Gerenciar Alertas Ativos":
                     msg_tel = f"🚨 *ALERTA DA MONITORIA AUTOMÁTICA:* 🚨\n\nRota: {orig_a} ➔ {dest_a} (Alvo: R$ {alvo_a})\n"
                     disparar_mensagem = False
                     
-                    # Varre o range do alerta
                     for d_ida_v in dias_varredura:
                         d_volta_v = d_ida_v + datetime.timedelta(days=dur_a)
                         url_da_api = "https://serpapi.com/search"
@@ -233,6 +251,10 @@ elif pagina == "🗂️ Gerenciar Alertas Ativos":
                             "travel_class": cl_a, "adults": int(ad_a), "children": int(cr_a),
                             "currency": "BRL", "api_key": MINHA_CHAVE_SERPAPI
                         }
+                        
+                        if diretos_a == 1:
+                            params["stops"] = "0"
+                            
                         res = requests.get(url_da_api, params=params).json()
                         
                         if "error" not in res:
@@ -255,16 +277,20 @@ elif pagina == "🗂️ Gerenciar Alertas Ativos":
     st.markdown("---")
     
     # LISTAGEM E CONTROLE DOS CARDS SALVOS
-    cursor.execute("SELECT id, origem, destino, data_ida_inicio, data_ida_fim, duracao_viagem, preco_alvo, status FROM alertas")
+    cursor.execute("SELECT id, origem, destino, data_ida_inicio, data_ida_fim, duracao_viagem, preco_alvo, status, somente_diretos FROM alertas")
     alertas_salvos = cursor.fetchall()
 
     if not alertas_salvos:
         st.info("Você ainda não tem nenhum alerta criado.")
     else:
         for alerta in alertas_salvos:
-            id_alerta, orig, dest, ida_i, ida_f, dur, alvo, status = alerta
-            with st.expander(f"✈️ Rota: {orig} ➔ {dest} | Meta Grupo: R$ {alvo} | Estado: **{status}**"):
-                st.write(f"📅 **Intervalo de Ida cadastrado:** {ida_i} até {ida_f} | ⏳ **Duração:** {dur} dias")
+            id_alerta, orig, dest, ida_i, ida_f, dur, alvo, status, diretos = alerta
+            
+            # Ajuste na formatação do card para mostrar se é apenas voo direto
+            badge_direto = " | 🛑 Apenas Diretos" if diretos == 1 else ""
+            
+            with st.expander(f"✈️ Rota: {orig} ➔ {dest} | Meta Grupo: R$ {alvo} | Estado: **{status}** {badge_direto}"):
+                st.write(f"📅 **Intervalo de Ida:** {ida_i} até {ida_f} | ⏳ **Duração:** {dur} dias")
                 col_card1, col_card2 = st.columns(2)
                 with col_card1:
                     if status == "Ativo":
