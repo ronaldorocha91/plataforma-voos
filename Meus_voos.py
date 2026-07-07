@@ -137,7 +137,7 @@ if pagina == "🔍 Buscar e Criar Alertas":
                     
                     # Se o usuário marcou apenas diretos, injeta o filtro na API
                     if somente_diretos:
-                        parametros["stops"] = "0"
+                        parametros["stops"] = "1"
 
                     resposta = requests.get(url_da_api, params=parametros)
                     dados_dos_voos = resposta.json()
@@ -253,7 +253,7 @@ elif pagina == "🗂️ Gerenciar Alertas Ativos":
                         }
                         
                         if diretos_a == 1:
-                            params["stops"] = "0"
+                            params["stops"] = "1"
                             
                         res = requests.get(url_da_api, params=params).json()
                         
