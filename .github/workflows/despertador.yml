@@ -1,0 +1,32 @@
+name: Despertador de Voos (3h da manhã)
+
+on:
+  schedule:
+    # O horário do GitHub é UTC. 6h da manhã UTC = 3h da manhã no Brasil
+    - cron: '0 6 * * *'
+  workflow_dispatch: # Adiciona um botão para rodar manualmente se você quiser testar no GitHub
+
+jobs:
+  run-motor:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Baixando os arquivos
+      uses: actions/checkout@v3
+
+    - name: Preparando o Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Instalando bibliotecas
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Rodando o Motor
+      env:
+        SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+      run: python motor_automacao.py
