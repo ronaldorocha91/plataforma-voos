@@ -141,8 +141,6 @@ if pagina == "🔍 Buscar Voos":
             
         valor_direto_bd = 1 if somente_diretos else 0
         id_unico = str(uuid.uuid4())[:8]
-        
-        # Correção da Sintaxe: Atribuição direta sem quebras de linha que quebram o interpretador
         nova_linha = [id_unico, origem, destino, data_ida_inicio.strftime("%Y-%m-%d"), data_ida_fim.strftime("%Y-%m-%d"), duracao_calc, classe_voo, int(qtd_adultos), int(qtd_criancas), float(preco_alvo), "Ativo", valor_direto_bd]
         
         plan_al_direta = obter_conexao_direta("alertas")
@@ -255,4 +253,59 @@ elif pagina == "🗂️ Gerenciar Alertas":
     
     alertas_salvos = buscar_dados_planilha("alertas")
 
-    if not alertas_
+    if not alertas_salvos:
+        st.info("Nenhum alerta cadastrado na planilha.")
+    else:
+        for indice_linha, alerta in enumerate(alertas_salvos, start=2):
+            id_a = alerta.get("id", "")
+            orig, dest = alerta.get("origem", ""), alerta.get("destino", "")
+            alvo, status, diretos = alerta.get("preco_alvo", 0), alerta.get("status", ""), alerta.get("somente_diretos", 0)
+            
+            badge_direto = " | 🛑 Apenas Diretos" if diretos == 1 else ""
+            with st.expander(f"✈️ {orig} ➔ {dest} | Meta: R$ {alvo} | Estado: **{status}** {badge_direto}"):
+                col_c1, col_c2 = st.columns(2)
+                with col_c1:
+                    if status == "Ativo":
+                        if st.button("⏸️ Pausar", key=f"p_{id_a}"):
+                            plan_al_direta = obter_conexao_direta("alertas")
+                            plan_al_direta.update_cell(indice_linha, 11, 'Pausado')
+                            st.cache_data.clear()
+                            time.sleep(1)
+                            st.rerun()
+                    else:
+                        if st.button("▶️ Ativar", key=f"a_{id_a}"):
+                            plan_al_direta = obter_conexao_direta("alertas")
+                            plan_al_direta.update_cell(indice_linha, 11, 'Ativo')
+                            st.cache_data.clear()
+                            time.sleep(1)
+                            st.rerun()
+                with col_c2:
+                    if st.button("🗑️ Deletar", key=f"d_{id_a}"):
+                        plan_al_direta = obter_conexao_direta("alertas")
+                        plan_al_direta.delete_rows(indice_linha)
+                        st.cache_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+
+# =================================================================
+# PÁGINA 3: HISTÓRICO DE PESQUISAS
+# =================================================================
+elif pagina == "📜 Histórico de Pesquisas":
+    st.title("📜 Seu Histórico de Melhores Voos")
+    st.write("Abaixo estão as pesquisas salvas no Google Sheets.")
+    
+    historico_salvo = buscar_dados_planilha("historico")
+
+    if not historico_salvo:
+        st.info("Você ainda não salvou nenhum resultado no histórico. Faça uma busca e clique em 'Salvar Resultado no Histórico'.")
+    else:
+        for linha, registro in enumerate(reversed(historico_salvo)):
+            data_pesq = registro.get("data_pesquisa", "")
+            rota = registro.get("rota", "")
+            preco = registro.get("melhor_preco", "")
+            detalhes = registro.get("detalhes", "")
+            
+            with st.expander(f"🔍 {data_pesq} | {rota} | {preco}"):
+                st.markdown(detalhes.replace('\n', '  \n'))
+                link_wpp_hist = f"https://api.whatsapp.com/send?text={urllib.parse.quote('Olha essa pesquisa que deixei salva:\n\n' + detalhes)}"
+                st.markdown(f"[📲 Reenviar pelo WhatsApp]({link_wpp_hist})", unsafe_allow_html=True)
