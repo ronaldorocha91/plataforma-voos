@@ -13,8 +13,13 @@ import time
 # =================================================================
 st.set_page_config(page_title="Plataforma de Voos Premium", page_icon="✈️", layout="wide")
 
-# Função com Cache para evitar estourar a cota de leitura (Erro 429)
-@st.cache_data(ttl=10) # Guarda os dados por 10 segundos antes de pedir ao Google de novo
+# Inicializa as gavetas de memória (Session State) para evitar que os dados somam ao clicar em botões
+if "resultados_voos" not in st.session_state:
+    st.session_state.resultados_voos = None
+if "filtros_pesquisa" not in st.session_state:
+    st.session_state.filtros_pesquisa = {}
+
+@st.cache_data(ttl=5) # Cache curto apenas para evitar duplo clique acidental travar a cota do Sheets
 def buscar_dados_planilha(nome_aba):
     cred_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
     escopo = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -44,7 +49,7 @@ st.sidebar.title("📌 Menu")
 pagina = st.sidebar.radio("Navegação:", ["🔍 Buscar Voos", "🗂️ Gerenciar Alertas", "📜 Histórico de Pesquisas"])
 
 # =================================================================
-# FUNÇÃO: EXTRAIR DETALHES RICOS DO VOO (TELA, ZAP E TELEGRAM)
+# FUNÇÃO: EXTRAIR DETALHES RICOS DO VOO
 # =================================================================
 def extrair_detalhes_completos(voo, data_ida_str, data_volta_str):
     trechos = voo.get("flights", [])
@@ -97,9 +102,9 @@ if pagina == "🔍 Buscar Voos":
     st.subheader("🗓️ Datas da Viagem")
     col_d1, col_d2, col_d3 = st.columns(3)
     with col_d1:
-        data_ida_inicio = st.date_input("Ida a partir de:", datetime.date.today() + datetime.timedelta(days=30))
+        data_ida_inicio = st.date_input("Ida a partir de:", datetime.date(2026, 10, 10))
     with col_d2:
-        data_ida_fim = st.date_input("Ida até (Range):", data_ida_inicio)
+        data_ida_fim = st.date_input("Ida até (Range):", datetime.date(2026, 10, 12))
     
     with col_d3:
         tipo_volta = st.radio("Como definir a volta?", ["Opção A (Data Fixa)", "Opção B (Duração em Dias)"])
@@ -142,12 +147,12 @@ if pagina == "🔍 Buscar Voos":
             int(qtd_adultos), int(qtd_criancas), float(preco_alvo), "Ativo", valor_direto_bd
         ]
         
-        # Conecta e envia de forma direta
         plan_al_direta = obter_conexao_direta("alertas")
         plan_al_direta.append_row(nova_linha)
-        st.cache_data.clear() # Limpa o cache para forçar atualização na próxima leitura
+        st.cache_data.clear()
         st.success("✅ Alerta salvo na Planilha do Google com sucesso!")
 
+    # Executa a busca real e salva na gaveta (Session State)
     if buscar:
         if data_ida_inicio > data_ida_fim:
             st.error("A data inicial não pode ser maior que a data final.")
@@ -185,63 +190,72 @@ if pagina == "🔍 Buscar Voos":
                             todos_os_voos_acumulados.append(v)
 
             if todos_os_voos_acumulados:
-                todos_os_voos_acumulados = sorted(todos_os_voos_acumulados, key=lambda x: x.get("price", 999999))[:10]
-                st.success("✅ Resultados encontrados!")
-                
-                melhor_voo_historico = todos_os_voos_acumulados[0]
-                detalhes_historico = extrair_detalhes_completos(melhor_voo_historico, melhor_voo_historico['data_ida_pesquisada'], melhor_voo_historico['data_volta_pesquisada'])
-                
-                if st.button("💾 Salvar Melhor Resultado no Histórico"):
-                    hoje = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
-                    rota_str = f"{origem} -> {destino}"
-                    datas_str = f"{melhor_voo_historico['data_ida_pesquisada']} a {melhor_voo_historico['data_volta_pesquisada']}"
-                    preco_str = f"R$ {melhor_voo_historico.get('price', 0)}"
-                    
-                    plan_hist_direta = obter_conexao_direta("historico")
-                    plan_hist_direta.append_row([hoje, rota_str, datas_str, preco_str, detalhes_historico])
-                    st.cache_data.clear()
-                    st.success("Histórico atualizado com sucesso!")
-
-                msg_tel = f"🚨 *BUSCA MANUAL ABAIXO DE R$ {preco_alvo}!* 🚨\n\n"
-                achou_promocao = False
-
-                for index, voo in enumerate(todos_os_voos_acumulados, 1):
-                    p_total = voo.get("price", 0)
-                    ida_str = voo['data_ida_pesquisada']
-                    volta_str = voo['data_volta_pesquisada']
-                    
-                    texto_detalhado = extrair_detalhes_completos(voo, ida_str, volta_str)
-                    
-                    with st.expander(f"#{index} | R$ {p_total} | Ida: {ida_str} - Volta: {volta_str}", expanded=(index==1)):
-                        st.markdown(texto_detalhado.replace('\n', '  \n')) 
-                        
-                        texto_wpp = f"Olha essa passagem que achei! 😱\n\n*Preço Total:* R$ {p_total}\n{texto_detalhado}"
-                        link_wpp = f"https://api.whatsapp.com/send?text={urllib.parse.quote(texto_wpp)}"
-                        
-                        col_w1, col_w2 = st.columns(2)
-                        with col_w1:
-                            st.markdown(f"[📲 Compartilhar no WhatsApp]({link_wpp})", unsafe_allow_html=True)
-                        with col_w2:
-                            st.download_button(label="📄 Baixar Resumo (TXT)", data=texto_wpp, file_name=f"Voo_{p_total}.txt", mime="text/plain", key=f"dl_{index}")
-                    
-                    if p_total <= preco_alvo:
-                        achou_promocao = True
-                        msg_tel += f"💰 *R$ {p_total}*\n{texto_detalhado}\n"
-                        msg_tel += "➖➖➖➖➖➖➖➖➖➖\n"
-
-                if achou_promocao:
-                    requests.post(f"https://api.telegram.org/bot{MEU_TOKEN_TELEGRAM}/sendMessage", data={"chat_id": MEU_CHAT_ID, "text": msg_tel, "parse_mode": "Markdown"})
-                    st.success("📲 A busca atingiu o preço alvo! Alerta detalhado enviado ao seu Telegram.")
+                # Armazena os resultados e os filtros de forma fixa na sessão segura
+                st.session_state.resultados_voos = sorted(todos_os_voos_acumulados, key=lambda x: x.get("price", 999999))[:10]
+                st.session_state.filtros_pesquisa = {"origem": origem, "destino": destino, "preco_alvo": preco_alvo, "somente_diretos": somente_diretos}
             else:
+                st.session_state.resultados_voos = []
                 st.error("Nenhum voo encontrado com esses critérios.")
 
+    # Renderiza os cards e botões adicionais se houver dados salvos na gaveta (Session State)
+    if st.session_state.resultados_voos:
+        st.success("✅ Resultados encontrados!")
+        
+        # --- BLOCO DE CONTROLE DO HISTÓRICO FIXADO ---
+        melhor_voo_historico = st.session_state.resultados_voos[0]
+        detalhes_historico = extrair_detalhes_completos(melhor_voo_historico, melhor_voo_historico['data_ida_pesquisada'], melhor_voo_historico['data_volta_pesquisada'])
+        
+        if st.button("💾 Salvar Melhor Resultado no Histórico"):
+            with st.spinner("Gravando no Google Sheets..."):
+                hoje = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+                rota_str = f"{st.session_state.filtros_pesquisa['origem']} -> {st.session_state.filtros_pesquisa['destino']}"
+                datas_str = f"{melhor_voo_historico['data_ida_pesquisada']} a {melhor_voo_historico['data_volta_pesquisada']}"
+                preco_str = f"R$ {melhor_voo_historico.get('price', 0)}"
+                
+                plan_hist_direta = obter_conexao_direta("historico")
+                plan_hist_direta.append_row([hoje, rota_str, datas_str, preco_str, detalhes_historico])
+                st.cache_data.clear() # Limpa o cache para forçar a atualização imediata na outra aba
+                st.success("🔥 Sucesso! O melhor voo deste grupo foi gravado no seu histórico permanente.")
+
+        # --- EXIBIÇÃO DOS DETALHES ---
+        msg_tel = f"🚨 *BUSCA MANUAL ABAIXO DE R$ {st.session_state.filtros_pesquisa['preco_alvo']}!* 🚨\n\n"
+        achou_promocao = False
+
+        for index, voo in enumerate(st.session_state.resultados_voos, 1):
+            p_total = voo.get("price", 0)
+            ida_str = voo['data_ida_pesquisada']
+            volta_str = voo['data_volta_pesquisada']
+            
+            texto_detalhado = extrair_detalhes_completos(voo, ida_str, volta_str)
+            
+            with st.expander(f"#{index} | R$ {p_total} | Ida: {ida_str} - Volta: {volta_str}", expanded=(index==1)):
+                st.markdown(texto_detalhado.replace('\n', '  \n')) 
+                
+                texto_wpp = f"Olha essa passagem que achei! 😱\n\n*Preço Total:* R$ {p_total}\n{texto_detalhado}"
+                link_wpp = f"https://api.whatsapp.com/send?text={urllib.parse.quote(texto_wpp)}"
+                
+                col_w1, col_w2 = st.columns(2)
+                with col_w1:
+                    st.markdown(f"[📲 Compartilhar no WhatsApp]({link_wpp})", unsafe_allow_html=True)
+                with col_w2:
+                    st.download_button(label="📄 Baixar Resumo (TXT)", data=texto_wpp, file_name=f"Voo_{p_total}.txt", mime="text/plain", key=f"dl_{index}")
+            
+            if p_total <= st.session_state.filtros_pesquisa['preco_alvo']:
+                achou_promocao = True
+                msg_tel += f"💰 *R$ {p_total}*\n{texto_detalhado}\n"
+                msg_tel += "➖➖➖➖➖➖➖➖➖➖\n"
+
+        # Disparo do Telegram se houver promoção dentro dos dados fixados
+        if achou_promocao and buscar: # Só envia o Telegram na hora exata do clique de busca para evitar loops de envio
+            requests.post(f"https://api.telegram.org/bot{MEU_TOKEN_TELEGRAM}/sendMessage", data={"chat_id": MEU_CHAT_ID, "text": msg_tel, "parse_mode": "Markdown"})
+            st.success("📲 A busca atingiu o preço alvo! Alerta detalhado enviado ao seu Telegram.")
+
 # =================================================================
-# PÁGINA 2: GERENCIAR ALERTAS ATIVOS (OTIMIZADA CONTRA ERRO 429)
+# PÁGINA 2: GERENCIAR ALERTAS ATIVOS
 # =================================================================
 elif pagina == "🗂️ Gerenciar Alertas":
     st.title("🗂️ Seus Alertas de Monitoramento")
     
-    # Utiliza a leitura em cache para poupar o limite da API
     alertas_salvos = buscar_dados_planilha("alertas")
 
     if not alertas_salvos:
@@ -260,8 +274,8 @@ elif pagina == "🗂️ Gerenciar Alertas":
                         if st.button("⏸️ Pausar", key=f"p_{id_a}"):
                             plan_al_direta = obter_conexao_direta("alertas")
                             plan_al_direta.update_cell(indice_linha, 11, 'Pausado')
-                            st.cache_data.clear() # Limpa cache de leitura
-                            time.sleep(1) # Pausa estratégica para o Google Sheets respirar
+                            st.cache_data.clear()
+                            time.sleep(1)
                             st.rerun()
                     else:
                         if st.button("▶️ Ativar", key=f"a_{id_a}"):
@@ -283,12 +297,12 @@ elif pagina == "🗂️ Gerenciar Alertas":
 # =================================================================
 elif pagina == "📜 Histórico de Pesquisas":
     st.title("📜 Seu Histórico de Melhores Voos")
-    st.write("Abaixo estão as pesquisas salvas (Atualizado a cada 10s).")
+    st.write("Abaixo estão as pesquisas salvas no Google Sheets.")
     
     historico_salvo = buscar_dados_planilha("historico")
 
     if not historico_salvo:
-        st.info("Você ainda não salvou nenhum resultado no histórico.")
+        st.info("Você ainda não salvou nenhum resultado no histórico. Faça uma busca e clique em 'Salvar Resultado no Histórico'.")
     else:
         for linha, registro in enumerate(reversed(historico_salvo)):
             data_pesq = registro.get("data_pesquisa", "")
