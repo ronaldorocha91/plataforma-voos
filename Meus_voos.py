@@ -6,27 +6,35 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 import uuid
 import urllib.parse
+import time
 
 # =================================================================
 # CONFIGURAÇÃO DA PÁGINA E BANCO DE DADOS NA NUVEM
 # =================================================================
 st.set_page_config(page_title="Plataforma de Voos Premium", page_icon="✈️", layout="wide")
 
-try:
-    MINHA_CHAVE_SERPAPI = st.secrets["SERPAPI_KEY"]
-    MEU_TOKEN_TELEGRAM = st.secrets["TELEGRAM_TOKEN"]
-    MEU_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
-    
+# Função com Cache para evitar estourar a cota de leitura (Erro 429)
+@st.cache_data(ttl=10) # Guarda os dados por 10 segundos antes de pedir ao Google de novo
+def buscar_dados_planilha(nome_aba):
     cred_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
     escopo = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     credenciais = ServiceAccountCredentials.from_json_keyfile_dict(cred_dict, escopo)
     cliente_google = gspread.authorize(credenciais)
-    
-    planilha_alertas = cliente_google.open("Alertas_Voos").worksheet("alertas")
-    planilha_historico = cliente_google.open("Alertas_Voos").worksheet("historico")
-    
+    return cliente_google.open("Alertas_Voos").worksheet(nome_aba).get_all_records()
+
+def obter_conexao_direta(nome_aba):
+    cred_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS_JSON"])
+    escopo = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    credenciais = ServiceAccountCredentials.from_json_keyfile_dict(cred_dict, escopo)
+    cliente_google = gspread.authorize(credenciais)
+    return cliente_google.open("Alertas_Voos").worksheet(nome_aba)
+
+try:
+    MINHA_CHAVE_SERPAPI = st.secrets["SERPAPI_KEY"]
+    MEU_TOKEN_TELEGRAM = st.secrets["TELEGRAM_TOKEN"]
+    MEU_CHAT_ID = st.secrets["TELEGRAM_CHAT_ID"]
 except Exception as e:
-    st.error(f"Erro ao conectar com as chaves (Secrets) ou Planilha: {e}")
+    st.error(f"Erro ao conectar com as chaves (Secrets): {e}")
     st.stop()
 
 # =================================================================
@@ -64,7 +72,6 @@ def extrair_detalhes_completos(voo, data_ida_str, data_volta_str):
         
         texto += f"🛫 {orig_t} ({saida}) ➔ 🛬 {dest_t} ({chegada}) | Voo: {dur_t//60}h {dur_t%60}m\n"
         
-        # Se houver conexão após este trecho
         if j < len(layovers):
             espera = layovers[j].get("duration", 0)
             local = layovers[j].get("name", "Conexão")
@@ -121,7 +128,6 @@ if pagina == "🔍 Buscar Voos":
     with col_btn2:
         salvar_alerta = st.button("🔔 Salvar Rota para Monitoramento (Alerta)")
 
-    # SALVAR ALERTA
     if salvar_alerta:
         if data_volta_fixa:
             duracao_calc = (data_volta_fixa - data_ida_inicio).days
@@ -135,10 +141,13 @@ if pagina == "🔍 Buscar Voos":
             data_ida_fim.strftime("%Y-%m-%d"), duracao_calc, classe_voo, 
             int(qtd_adultos), int(qtd_criancas), float(preco_alvo), "Ativo", valor_direto_bd
         ]
-        planilha_alertas.append_row(nova_linha)
+        
+        # Conecta e envia de forma direta
+        plan_al_direta = obter_conexao_direta("alertas")
+        plan_al_direta.append_row(nova_linha)
+        st.cache_data.clear() # Limpa o cache para forçar atualização na próxima leitura
         st.success("✅ Alerta salvo na Planilha do Google com sucesso!")
 
-    # BUSCA MANUAL
     if buscar:
         if data_ida_inicio > data_ida_fim:
             st.error("A data inicial não pode ser maior que a data final.")
@@ -179,7 +188,6 @@ if pagina == "🔍 Buscar Voos":
                 todos_os_voos_acumulados = sorted(todos_os_voos_acumulados, key=lambda x: x.get("price", 999999))[:10]
                 st.success("✅ Resultados encontrados!")
                 
-                # --- LÓGICA DE HISTÓRICO ---
                 melhor_voo_historico = todos_os_voos_acumulados[0]
                 detalhes_historico = extrair_detalhes_completos(melhor_voo_historico, melhor_voo_historico['data_ida_pesquisada'], melhor_voo_historico['data_volta_pesquisada'])
                 
@@ -188,10 +196,12 @@ if pagina == "🔍 Buscar Voos":
                     rota_str = f"{origem} -> {destino}"
                     datas_str = f"{melhor_voo_historico['data_ida_pesquisada']} a {melhor_voo_historico['data_volta_pesquisada']}"
                     preco_str = f"R$ {melhor_voo_historico.get('price', 0)}"
-                    planilha_historico.append_row([hoje, rota_str, datas_str, preco_str, detalhes_historico])
+                    
+                    plan_hist_direta = obter_conexao_direta("historico")
+                    plan_hist_direta.append_row([hoje, rota_str, datas_str, preco_str, detalhes_historico])
+                    st.cache_data.clear()
                     st.success("Histórico atualizado com sucesso!")
 
-                # --- LÓGICA DE TELEGRAM E EXIBIÇÃO ---
                 msg_tel = f"🚨 *BUSCA MANUAL ABAIXO DE R$ {preco_alvo}!* 🚨\n\n"
                 achou_promocao = False
 
@@ -202,7 +212,6 @@ if pagina == "🔍 Buscar Voos":
                     
                     texto_detalhado = extrair_detalhes_completos(voo, ida_str, volta_str)
                     
-                    # Exibe no site com Expander
                     with st.expander(f"#{index} | R$ {p_total} | Ida: {ida_str} - Volta: {volta_str}", expanded=(index==1)):
                         st.markdown(texto_detalhado.replace('\n', '  \n')) 
                         
@@ -215,13 +224,11 @@ if pagina == "🔍 Buscar Voos":
                         with col_w2:
                             st.download_button(label="📄 Baixar Resumo (TXT)", data=texto_wpp, file_name=f"Voo_{p_total}.txt", mime="text/plain", key=f"dl_{index}")
                     
-                    # Constrói mensagem do Telegram se bater o preço
                     if p_total <= preco_alvo:
                         achou_promocao = True
                         msg_tel += f"💰 *R$ {p_total}*\n{texto_detalhado}\n"
                         msg_tel += "➖➖➖➖➖➖➖➖➖➖\n"
 
-                # Dispara Telegram se achou promoção
                 if achou_promocao:
                     requests.post(f"https://api.telegram.org/bot{MEU_TOKEN_TELEGRAM}/sendMessage", data={"chat_id": MEU_CHAT_ID, "text": msg_tel, "parse_mode": "Markdown"})
                     st.success("📲 A busca atingiu o preço alvo! Alerta detalhado enviado ao seu Telegram.")
@@ -229,14 +236,13 @@ if pagina == "🔍 Buscar Voos":
                 st.error("Nenhum voo encontrado com esses critérios.")
 
 # =================================================================
-# PÁGINA 2: GERENCIAR ALERTAS ATIVOS
+# PÁGINA 2: GERENCIAR ALERTAS ATIVOS (OTIMIZADA CONTRA ERRO 429)
 # =================================================================
 elif pagina == "🗂️ Gerenciar Alertas":
     st.title("🗂️ Seus Alertas de Monitoramento")
-    try:
-        alertas_salvos = planilha_alertas.get_all_records()
-    except Exception as e:
-        alertas_salvos = []
+    
+    # Utiliza a leitura em cache para poupar o limite da API
+    alertas_salvos = buscar_dados_planilha("alertas")
 
     if not alertas_salvos:
         st.info("Nenhum alerta cadastrado na planilha.")
@@ -252,15 +258,24 @@ elif pagina == "🗂️ Gerenciar Alertas":
                 with col_c1:
                     if status == "Ativo":
                         if st.button("⏸️ Pausar", key=f"p_{id_a}"):
-                            planilha_alertas.update_cell(indice_linha, 11, 'Pausado')
+                            plan_al_direta = obter_conexao_direta("alertas")
+                            plan_al_direta.update_cell(indice_linha, 11, 'Pausado')
+                            st.cache_data.clear() # Limpa cache de leitura
+                            time.sleep(1) # Pausa estratégica para o Google Sheets respirar
                             st.rerun()
                     else:
                         if st.button("▶️ Ativar", key=f"a_{id_a}"):
-                            planilha_alertas.update_cell(indice_linha, 11, 'Ativo')
+                            plan_al_direta = obter_conexao_direta("alertas")
+                            plan_al_direta.update_cell(indice_linha, 11, 'Ativo')
+                            st.cache_data.clear()
+                            time.sleep(1)
                             st.rerun()
                 with col_c2:
                     if st.button("🗑️ Deletar", key=f"d_{id_a}"):
-                        planilha_alertas.delete_rows(indice_linha)
+                        plan_al_direta = obter_conexao_direta("alertas")
+                        plan_al_direta.delete_rows(indice_linha)
+                        st.cache_data.clear()
+                        time.sleep(1)
                         st.rerun()
 
 # =================================================================
@@ -268,13 +283,9 @@ elif pagina == "🗂️ Gerenciar Alertas":
 # =================================================================
 elif pagina == "📜 Histórico de Pesquisas":
     st.title("📜 Seu Histórico de Melhores Voos")
-    st.write("Abaixo estão as pesquisas salvas para comparação futura.")
+    st.write("Abaixo estão as pesquisas salvas (Atualizado a cada 10s).")
     
-    try:
-        historico_salvo = planilha_historico.get_all_records()
-    except Exception as e:
-        st.error("Aba 'historico' não encontrada ou vazia na planilha.")
-        historico_salvo = []
+    historico_salvo = buscar_dados_planilha("historico")
 
     if not historico_salvo:
         st.info("Você ainda não salvou nenhum resultado no histórico.")
